@@ -2,6 +2,27 @@ export type ViewMode = 'reading' | 'editing' | 'critical';
 export type AnchorType = 'chapter' | 'sentence' | 'word';
 export type AnnotationKind = 'footnote' | 'variant' | 'background' | 'crossref';
 export type AnnotationStatus = 'open' | 'resolved';
+export type ConflictDecisionMethod = 'select' | 'merge';
+
+export interface ConflictDecisionEntry {
+  annotationId: string;
+  source: string;
+  originalTitle: string;
+  originalBody: string;
+  role: 'selected' | 'rejected' | 'merged';
+  selectedText?: string;
+}
+
+export interface ConflictDecision {
+  id: string;
+  groupKey: string;
+  anchorId: string;
+  anchorType: AnchorType;
+  kind: AnnotationKind;
+  method: ConflictDecisionMethod;
+  decidedAt: string;
+  entries: ConflictDecisionEntry[];
+}
 
 export interface TextToken {
   id: string;
@@ -36,6 +57,7 @@ export interface Annotation {
   tags: string[];
   conflictState: 'open' | 'resolved';
   conflictResolution?: string;
+  decisionIds?: string[];
   updatedAt: string;
 }
 
@@ -46,6 +68,7 @@ export interface VersionSnapshot {
   createdAt: string;
   chapters: Chapter[];
   annotations: Annotation[];
+  conflictDecisions: ConflictDecision[];
 }
 
 export interface TextDocument {
@@ -55,6 +78,7 @@ export interface TextDocument {
   edition: string;
   chapters: Chapter[];
   annotations: Annotation[];
+  conflictDecisions: ConflictDecision[];
   snapshots: VersionSnapshot[];
   updatedAt: string;
 }

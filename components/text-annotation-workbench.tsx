@@ -46,9 +46,14 @@ import {
   STORAGE_KEY,
   clone,
   collectSearchResults,
+  createConflictDecision,
   createInitialEditorState,
   editorReducer,
   getConflictGroups,
+  getDecisionEntryLabel,
+  getDecisionForAnnotation,
+  getDecisionMethodLabel,
+  getDecisionTargetLabel,
   getSentence,
   getTargetLabel,
   kindLabel,
@@ -59,9 +64,11 @@ import type {
   Annotation,
   AnnotationKind,
   AnchorType,
+  ConflictDecision,
   ConflictGroup,
   Sentence,
   TextDocument,
+  VersionSnapshot,
   ViewMode,
   WorkspaceState
 } from '@/lib/types';
@@ -123,10 +130,29 @@ function buildHtml(document: TextDocument) {
     )
     .join('\n');
 
+  const decisions = document.conflictDecisions.length
+    ? document.conflictDecisions
+        .map((decision) => {
+          const target = getDecisionTargetLabel(document, decision);
+          const method = getDecisionMethodLabel(decision.method);
+          const entries = decision.entries
+            .map((entry) => {
+              const body =
+                decision.method === 'select' && entry.role === 'selected'
+                  ? (entry.selectedText ?? entry.originalBody)
+                  : entry.originalBody;
+              return `<li class="decision-entry"><b>${escapeHtml(entry.source)}</b> <span>${escapeHtml(getDecisionEntryLabel(entry))}</span><br>${escapeHtml(body)}</li>`;
+            })
+            .join('');
+          return `<li class="decision"><b>${method}裁决</b> <span>${escapeHtml(target)}</span> <small>${escapeHtml(new Date(decision.decidedAt).toLocaleString('zh-CN'))}</small><ul>${entries}</ul></li>`;
+        })
+        .join('\n')
+    : '<li>暂无裁决记录。</li>';
+
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(document.title)}</title>
-<style>body{max-width:780px;margin:48px auto;padding:0 28px;font:17px/1.9 Georgia,"Noto Serif SC",serif;color:#29251f}h1{text-align:center}h2{margin-top:2.4em;border-bottom:1px solid #ddd;padding-bottom:.35em}.summary{color:#6b665d}li{margin:.8em 0}small{color:#777}</style></head>
+<style>body{max-width:780px;margin:48px auto;padding:0 28px;font:17px/1.9 Georgia,"Noto Serif SC",serif;color:#29251f}h1{text-align:center}h2{margin-top:2.4em;border-bottom:1px solid #ddd;padding-bottom:.35em}.summary{color:#6b665d}li{margin:.8em 0}small{color:#777}.decision{border-left:3px solid #b45309;padding-left:1em}.decision-entry{margin:.5em 0}.decision ul{padding-left:1.2em}</style></head>
 <body><h1>${escapeHtml(document.title)}</h1><p style="text-align:center">${escapeHtml(document.author)} · ${escapeHtml(document.edition)}</p>
-${sections}<hr><h2>注释与校记</h2><ol>${notes}</ol><p><small>导出时间：${new Date().toLocaleString('zh-CN')}</small></p></body></html>`;
+${sections}<hr><h2>注释与校记</h2><ol>${notes}</ol><h2>裁决记录</h2><ol>${decisions}</ol><p><small>导出时间：${new Date().toLocaleString('zh-CN')}</small></p></body></html>`;
 }
 
 function sentenceAnnotationCount(document: TextDocument, sentence: Sentence) {
@@ -258,6 +284,8 @@ function AnnotationCard({ annotation, document, selected, onSelect, onUpdate, on
   const [title, setTitle] = useState(annotation.title);
   const [body, setBody] = useState(annotation.body);
   const [source, setSource] = useState(annotation.source);
+  const decision = getDecisionForAnnotation(document, annotation);
+  const decisionEntry = decision?.entries.find((entry) => entry.annotationId === annotation.id);
 
   useEffect(() => {
     setTitle(annotation.title);
@@ -279,6 +307,11 @@ function AnnotationCard({ annotation, document, selected, onSelect, onUpdate, on
                   {kindLabel(annotation.kind)}
                 </Chip>
                 {annotation.conflictState === 'open' ? <Chip size="sm" color="danger" variant="bordered">争议中</Chip> : null}
+                {decision && decisionEntry ? (
+                  <Chip size="sm" color="warning" variant="flat">
+                    {getDecisionMethodLabel(decision.method)} · {getDecisionEntryLabel(decisionEntry)}
+                  </Chip>
+                ) : null}
               </div>
               <h4 className="mt-2 font-semibold text-stone-900">{annotation.title}</h4>
             </div>
@@ -325,6 +358,66 @@ function AnnotationCard({ annotation, document, selected, onSelect, onUpdate, on
       </CardBody>
     </Card>
   );
+}
+
+function DecisionRecord({
+  document,
+  decision,
+  compact = false
+}: {
+  document: Pick<TextDocument, 'chapters'>;
+  decision: ConflictDecision;
+  compact?: boolean;
+}) {
+  const target = getDecisionTargetLabel(document, decision);
+  const methodLabel = getDecisionMethodLabel(decision.method);
+
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-left">
+      <div className="flex flex-wrap items-center gap-2">
+        <Chip size="sm" color={decision.method === 'merge' ? 'secondary' : 'primary'} variant="flat">
+          {methodLabel}裁决
+        </Chip>
+        <b className="text-xs text-stone-900">{target}</b>
+        <span className="ml-auto text-[10px] text-stone-500">
+          {new Date(decision.decidedAt).toLocaleString('zh-CN', {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit'
+          })}
+        </span>
+      </div>
+      <div className="mt-2 space-y-2">
+        {decision.entries.map((entry) => (
+          <div key={entry.annotationId} className="rounded-md border border-amber-100 bg-white/80 p-2">
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <b className="text-stone-800">{entry.source}</b>
+              <Chip size="sm" variant={entry.role === 'rejected' ? 'bordered' : 'flat'} color={entry.role === 'selected' ? 'success' : 'default'}>
+                {getDecisionEntryLabel(entry)}
+              </Chip>
+              <span className="text-stone-400">{entry.originalTitle}</span>
+            </div>
+            <p className={`mt-1 text-[11px] leading-5 text-stone-700 ${compact ? 'line-clamp-2' : ''}`}>
+              {decision.method === 'select' && entry.role === 'selected'
+                ? (entry.selectedText ?? entry.originalBody)
+                : entry.originalBody}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type ComparisonSide = Pick<VersionSnapshot, 'chapters' | 'annotations' | 'conflictDecisions' | 'label'>;
+
+interface ComparisonChange {
+  id: string;
+  label: string;
+  detail: string;
+  decision?: ConflictDecision;
+  targetDocument: Pick<TextDocument, 'chapters'>;
 }
 
 export function TextAnnotationWorkbench() {
@@ -519,16 +612,7 @@ export function TextAnnotationWorkbench() {
       type: 'commit',
       label: mergeBodies ? '合并冲突来源' : '按来源解决冲突',
       mutate: (doc) => {
-        const winner = doc.annotations.find((annotation) => annotation.id === winnerId);
-        if (!winner) return;
-        for (const item of doc.annotations) {
-          if (item.anchorId !== group.anchorId || item.kind !== group.kind) continue;
-          item.conflictState = 'resolved';
-          item.conflictResolution = `${new Date().toISOString()} · 选用 ${winner.source}`;
-        }
-        if (mergeBodies) {
-          winner.body = group.annotations.map((item) => `【${item.source}】${item.body}`).join('\n\n');
-        }
+        createConflictDecision(doc, group, winnerId, mergeBodies ? 'merge' : 'select');
       }
     });
   }
@@ -557,10 +641,11 @@ export function TextAnnotationWorkbench() {
         doc.snapshots.push({
           id,
           label,
-          note: `由编辑版保存，共 ${doc.annotations.length} 条注释`,
+          note: `由编辑版保存，共 ${doc.annotations.length} 条注释、${doc.conflictDecisions.length} 条裁决记录`,
           createdAt: new Date().toISOString(),
           chapters: clone(doc.chapters),
-          annotations: clone(doc.annotations)
+          annotations: clone(doc.annotations),
+          conflictDecisions: clone(doc.conflictDecisions)
         });
       }
     });
@@ -577,6 +662,7 @@ export function TextAnnotationWorkbench() {
       mutate: (doc) => {
         doc.chapters = clone(version.chapters);
         doc.annotations = clone(version.annotations);
+        doc.conflictDecisions = clone(version.conflictDecisions ?? []);
       }
     });
   }
@@ -585,11 +671,16 @@ export function TextAnnotationWorkbench() {
     const left = document.snapshots.find((item) => item.id === leftVersionId) ?? document.snapshots[0];
     const right =
       rightVersionId === 'current'
-        ? { chapters: document.chapters, annotations: document.annotations, label: '当前草稿' }
+        ? {
+            chapters: document.chapters,
+            annotations: document.annotations,
+            conflictDecisions: document.conflictDecisions,
+            label: '当前草稿'
+          }
         : document.snapshots.find((item) => item.id === rightVersionId);
-    if (!left || !right) return { left: null, right: null, changes: [] as { id: string; label: string; detail: string }[] };
+    if (!left || !right) return { left: null, right: null, changes: [] as ComparisonChange[] };
 
-    const changes: { id: string; label: string; detail: string }[] = [];
+    const changes: ComparisonChange[] = [];
     const leftSentences = new Map(
       left.chapters.flatMap((chapter) => chapter.sentences.map((sentence) => [sentence.id, { chapter, sentence }] as const))
     );
@@ -597,12 +688,13 @@ export function TextAnnotationWorkbench() {
       for (const sentence of chapter.sentences) {
         const previous = leftSentences.get(sentence.id);
         if (!previous) {
-          changes.push({ id: sentence.id, label: `${chapter.title} · 新增句`, detail: sentence.text });
+          changes.push({ id: sentence.id, label: `${chapter.title} · 新增句`, detail: sentence.text, targetDocument: right });
         } else if (previous.sentence.text !== sentence.text) {
           changes.push({
             id: sentence.id,
             label: `${chapter.title} · 正文有改动`,
-            detail: `${previous.sentence.text} → ${sentence.text}`
+            detail: `${previous.sentence.text} → ${sentence.text}`,
+            targetDocument: right
           });
         }
       }
@@ -610,7 +702,36 @@ export function TextAnnotationWorkbench() {
     const leftAnnotationIds = new Set(left.annotations.map((item) => item.id));
     for (const annotation of right.annotations) {
       if (!leftAnnotationIds.has(annotation.id)) {
-        changes.push({ id: annotation.id, label: `新增注释 · ${annotation.title}`, detail: annotation.body });
+        changes.push({ id: annotation.id, label: `新增注释 · ${annotation.title}`, detail: annotation.body, targetDocument: right });
+      }
+    }
+
+    const leftDecisionIds = new Set(left.conflictDecisions.map((item) => item.id));
+    for (const decision of right.conflictDecisions) {
+      if (!leftDecisionIds.has(decision.id)) {
+        changes.push({
+          id: `decision-${decision.id}`,
+          label: `${getDecisionMethodLabel(decision.method)}裁决记录 · ${getDecisionTargetLabel(right, decision)}`,
+          detail: decision.entries
+            .map((entry) => `${entry.source}（${getDecisionEntryLabel(entry)}）：${entry.originalBody}`)
+            .join('\n'),
+          decision,
+          targetDocument: right
+        });
+      }
+    }
+    const rightDecisionIds = new Set(right.conflictDecisions.map((item) => item.id));
+    for (const decision of left.conflictDecisions) {
+      if (!rightDecisionIds.has(decision.id)) {
+        changes.push({
+          id: `decision-removed-${decision.id}`,
+          label: `裁决记录已移除 · ${getDecisionTargetLabel(left, decision)}`,
+          detail: decision.entries
+            .map((entry) => `${entry.source}（${getDecisionEntryLabel(entry)}）：${entry.originalBody}`)
+            .join('\n'),
+          decision,
+          targetDocument: left
+        });
       }
     }
     return { left, right, changes };
@@ -864,15 +985,29 @@ export function TextAnnotationWorkbench() {
 
                           {mode === 'critical' ? (
                             <div className="mt-3 grid gap-2 rounded-xl border border-blue-100 bg-blue-50/50 p-3 sm:grid-cols-2">
-                              {sentenceAnnotations.length ? sentenceAnnotations.map((annotation) => (
-                                <div key={annotation.id} className="critical-variant text-xs leading-5">
-                                  <div className="flex items-center gap-2">
-                                    <Chip size="sm" color={kindColors[annotation.kind]} variant="flat">{kindLabel(annotation.kind)}</Chip>
-                                    <b>{annotation.source}</b>
+                              {sentenceAnnotations.length ? sentenceAnnotations.map((annotation) => {
+                                const decision = getDecisionForAnnotation(document, annotation);
+                                const decisionEntry = decision?.entries.find((entry) => entry.annotationId === annotation.id);
+                                return (
+                                  <div key={annotation.id} className="critical-variant text-xs leading-5">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <Chip size="sm" color={kindColors[annotation.kind]} variant="flat">{kindLabel(annotation.kind)}</Chip>
+                                      <b>{annotation.source}</b>
+                                      {decision && decisionEntry ? (
+                                        <Chip size="sm" color="warning" variant="flat">
+                                          {getDecisionMethodLabel(decision.method)} · {getDecisionEntryLabel(decisionEntry)}
+                                        </Chip>
+                                      ) : null}
+                                    </div>
+                                    <p className="mt-1 text-stone-700">{annotation.body}</p>
+                                    {decision && decisionEntry ? (
+                                      <p className="mt-1 text-stone-500">
+                                        原文：{decisionEntry.originalBody}
+                                      </p>
+                                    ) : null}
                                   </div>
-                                  <p className="mt-1 text-stone-700">{annotation.body}</p>
-                                </div>
-                              )) : <p className="text-xs text-stone-500">本句尚无来源异文或校记。</p>}
+                                );
+                              }) : <p className="text-xs text-stone-500">本句尚无来源异文或校记。</p>}
                             </div>
                           ) : null}
 
@@ -1000,11 +1135,23 @@ export function TextAnnotationWorkbench() {
                           </CardBody>
                         </Card>
                       ))}
+
+                      {document.conflictDecisions.length ? (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-sm font-semibold text-stone-900">随版本保存的裁决记录</h3>
+                            <Chip size="sm" color="warning" variant="flat">{document.conflictDecisions.length} 条</Chip>
+                          </div>
+                          {document.conflictDecisions.slice().reverse().map((decision) => (
+                            <DecisionRecord key={decision.id} document={document} decision={decision} />
+                          ))}
+                        </div>
+                      ) : null}
                       {!conflicts.length ? (
                         <div className="grid place-items-center rounded-xl border border-dashed border-green-200 bg-green-50 p-8 text-center">
                           <Check className="h-8 w-8 text-green-600" />
                           <p className="mt-2 text-sm font-medium text-green-800">所有来源冲突均已解决</p>
-                          <p className="mt-1 text-xs text-green-700">已解决记录仍保留在各注释的来源字段中。</p>
+                          <p className="mt-1 text-xs text-green-700">裁决记录已随当前草稿和后续版本快照保存，可在下方查看、比较和导出。</p>
                         </div>
                       ) : null}
                     </div>
@@ -1050,25 +1197,30 @@ export function TextAnnotationWorkbench() {
                           {comparison.left ? <Button size="sm" variant="light" onPress={() => restoreVersion(comparison.left!.id)}>恢复左侧</Button> : null}
                         </div>
                         <div className="max-h-72 space-y-2 overflow-y-auto p-2">
-                          {comparison.changes.map((change) => (
-                            <button
-                              key={`${change.id}-${change.label}`}
-                              type="button"
-                              className="w-full rounded-lg bg-stone-50 p-2 text-left hover:bg-amber-50"
-                              onClick={() => {
-                                for (const chapter of document.chapters) {
-                                  const sentence = chapter.sentences.find((item) => item.id === change.id);
-                                  if (sentence) {
-                                    dispatch({ type: 'selectSentence', chapterId: chapter.id, sentenceId: sentence.id });
-                                    break;
+                          {comparison.changes.map((change) => {
+                            if (change.decision) {
+                              return <DecisionRecord key={`${change.id}-${change.label}`} document={change.targetDocument} decision={change.decision} />;
+                            }
+                            return (
+                              <button
+                                key={`${change.id}-${change.label}`}
+                                type="button"
+                                className="w-full rounded-lg bg-stone-50 p-2 text-left hover:bg-amber-50"
+                                onClick={() => {
+                                  for (const chapter of document.chapters) {
+                                    const sentence = chapter.sentences.find((item) => item.id === change.id);
+                                    if (sentence) {
+                                      dispatch({ type: 'selectSentence', chapterId: chapter.id, sentenceId: sentence.id });
+                                      break;
+                                    }
                                   }
-                                }
-                              }}
-                            >
-                              <div className="text-xs font-semibold text-stone-800">{change.label}</div>
-                              <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-stone-500">{change.detail}</div>
-                            </button>
-                          ))}
+                                }}
+                              >
+                                <div className="text-xs font-semibold text-stone-800">{change.label}</div>
+                                <div className="mt-1 line-clamp-2 whitespace-pre-line text-[11px] leading-4 text-stone-500">{change.detail}</div>
+                              </button>
+                            );
+                          })}
                           {!comparison.changes.length ? <p className="p-4 text-center text-xs text-stone-500">两个版本没有句子或注释差异。</p> : null}
                         </div>
                       </div>

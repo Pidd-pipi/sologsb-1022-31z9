@@ -1,6 +1,9 @@
 import type {
   Annotation,
   AnnotationKind,
+  ConflictDecision,
+  ConflictDecisionEntry,
+  ConflictDecisionMethod,
   ConflictGroup,
   EditorState,
   SearchResult,
@@ -15,9 +18,120 @@ export function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+export function normalizeDocument(document: TextDocument): TextDocument {
+  document.conflictDecisions ??= [];
+  for (const snapshot of document.snapshots) {
+    snapshot.conflictDecisions ??= [];
+  }
+  return document;
+}
+
+export function normalizeWorkspace(workspace: WorkspaceState): WorkspaceState {
+  normalizeDocument(workspace.document);
+  return workspace;
+}
+
+export function createDecisionId(decidedAt: string) {
+  const randomSuffix = Math.random().toString(36).slice(2, 8);
+  return `decision-${decidedAt.replace(/[^0-9]/g, '').slice(0, 13)}-${randomSuffix}`;
+}
+
+export function createConflictDecision(
+  document: TextDocument,
+  group: Pick<ConflictGroup, 'key' | 'anchorId' | 'anchorType' | 'kind' | 'annotations'>,
+  winnerId: string,
+  method: ConflictDecisionMethod
+): ConflictDecision | null {
+  const sourceAnnotations = group.annotations.filter((annotation) =>
+    document.annotations.some((item) => item.id === annotation.id)
+  );
+  const winner = sourceAnnotations.find((annotation) => annotation.id === winnerId);
+  if (!winner) return null;
+
+  const decidedAt = new Date().toISOString();
+  const entries: ConflictDecisionEntry[] = sourceAnnotations.map((annotation) => ({
+    annotationId: annotation.id,
+    source: annotation.source,
+    originalTitle: annotation.title,
+    originalBody: annotation.body,
+    role:
+      method === 'merge'
+        ? 'merged'
+        : annotation.id === winner.id
+          ? 'selected'
+          : 'rejected',
+    selectedText: method === 'select' && annotation.id === winner.id ? annotation.body : undefined
+  }));
+  const decision: ConflictDecision = {
+    id: createDecisionId(decidedAt),
+    groupKey: group.key,
+    anchorId: group.anchorId,
+    anchorType: group.anchorType,
+    kind: group.kind,
+    method,
+    decidedAt,
+    entries
+  };
+
+  if (method === 'merge') {
+    winner.body = entries
+      .map((entry) => {
+        const original = sourceAnnotations.find((annotation) => annotation.id === entry.annotationId);
+        return `【${entry.source}】${original?.body ?? entry.originalBody}`;
+      })
+      .join('\n\n');
+  }
+
+  for (const annotation of document.annotations) {
+    if (annotation.anchorId !== group.anchorId || annotation.kind !== group.kind) continue;
+    annotation.conflictState = 'resolved';
+    annotation.conflictResolution = `${decidedAt} · ${method === 'merge' ? '合并来源' : `选用 ${winner.source}`}`;
+    annotation.decisionIds = [...(annotation.decisionIds ?? []), decision.id];
+    annotation.updatedAt = decidedAt;
+  }
+
+  document.conflictDecisions.push(decision);
+  return decision;
+}
+
+export function getDecisionTargetLabel(document: ChapteredTextLike, decision: ConflictDecision) {
+  if (decision.anchorType === 'chapter') {
+    return document.chapters.find((chapter) => chapter.id === decision.anchorId)?.title ?? '未知章节';
+  }
+
+  for (const chapter of document.chapters) {
+    if (decision.anchorType === 'sentence') {
+      const sentence = chapter.sentences.find((item) => item.id === decision.anchorId);
+      if (sentence) return `${chapter.title} · 第 ${sentence.order} 句`;
+    } else {
+      for (const sentence of chapter.sentences) {
+        const token = sentence.tokens.find((item) => item.id === decision.anchorId);
+        if (token) return `${chapter.title} · “${token.text.trim()}”`;
+      }
+    }
+  }
+
+  return decision.anchorId;
+}
+
+export function getDecisionMethodLabel(method: ConflictDecisionMethod) {
+  return method === 'merge' ? '合并' : '选用';
+}
+
+export function getDecisionEntryLabel(entry: ConflictDecisionEntry) {
+  if (entry.role === 'selected') return '选中正文';
+  if (entry.role === 'rejected') return '列入校记';
+  return '合并出处';
+}
+
+export function getDecisionForAnnotation(document: TextDocument, annotation: Annotation) {
+  const decisionId = annotation.decisionIds?.at(-1);
+  return document.conflictDecisions.find((decision) => decision.id === decisionId) ?? null;
+}
+
 export function createInitialWorkspace(document: TextDocument): WorkspaceState {
   return {
-    document: clone(document),
+    document: normalizeDocument(clone(document)),
     mode: 'reading',
     selectedChapterId: document.chapters[0]?.id ?? '',
     selectedSentenceId: document.chapters[0]?.sentences[0]?.id ?? '',
@@ -60,7 +174,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
   switch (action.type) {
     case 'hydrate':
       return {
-        workspace: action.workspace,
+        workspace: normalizeWorkspace(action.workspace),
         past: [],
         future: [],
         lastAction: '已恢复离线草稿'
@@ -128,7 +242,10 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
   }
 }
 
-export function getSentence(document: TextDocument, sentenceId: string): Sentence | undefined {
+type AnnotatedTextLike = Pick<TextDocument, 'chapters' | 'annotations'>;
+type ChapteredTextLike = Pick<TextDocument, 'chapters'>;
+
+export function getSentence(document: ChapteredTextLike, sentenceId: string): Sentence | undefined {
   for (const chapter of document.chapters) {
     const sentence = chapter.sentences.find((item) => item.id === sentenceId);
     if (sentence) return sentence;
@@ -136,7 +253,7 @@ export function getSentence(document: TextDocument, sentenceId: string): Sentenc
   return undefined;
 }
 
-export function getTargetLabel(document: TextDocument, annotation: Annotation): string {
+export function getTargetLabel(document: ChapteredTextLike, annotation: Annotation): string {
   if (annotation.anchorType === 'chapter') {
     return document.chapters.find((chapter) => chapter.id === annotation.anchorId)?.title ?? '未知章节';
   }
@@ -243,7 +360,7 @@ export function getConflictGroups(document: TextDocument): ConflictGroup[] {
     });
 }
 
-function findTokenText(document: TextDocument, tokenId: string) {
+function findTokenText(document: ChapteredTextLike, tokenId: string) {
   for (const chapter of document.chapters) {
     for (const sentence of chapter.sentences) {
       const token = sentence.tokens.find((item) => item.id === tokenId);
