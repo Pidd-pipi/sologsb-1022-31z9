@@ -36,6 +36,18 @@ export function createInitialEditorState(document: TextDocument): EditorState {
   };
 }
 
+/** 兼容旧版离线草稿：补齐裁决记录字段，避免 hydrate 后丢失或报错 */
+export function migrateWorkspace(stored: WorkspaceState): WorkspaceState {
+  const document = stored.document;
+  if (!document) return stored;
+  document.resolutions = Array.isArray(document.resolutions) ? document.resolutions : [];
+  document.snapshots = (document.snapshots ?? []).map((snapshot) => ({
+    ...snapshot,
+    resolutions: Array.isArray(snapshot.resolutions) ? snapshot.resolutions : []
+  }));
+  return stored;
+}
+
 function pushHistory(state: EditorState, next: WorkspaceState, label: string): EditorState {
   return {
     workspace: next,

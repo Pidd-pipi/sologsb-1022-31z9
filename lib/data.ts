@@ -241,7 +241,8 @@ const initialSnapshot: VersionSnapshot = {
   note: '初始整理稿，保留底本用字并录入首批校注。',
   createdAt: FIXED_TIME,
   chapters: structuredClone(chapters),
-  annotations: structuredClone(annotations)
+  annotations: structuredClone(annotations),
+  resolutions: []
 };
 
 export const initialDocument: TextDocument = {
@@ -251,6 +252,7 @@ export const initialDocument: TextDocument = {
   edition: '整理底本',
   chapters,
   annotations,
+  resolutions: [],
   snapshots: [initialSnapshot],
   updatedAt: FIXED_TIME
 };

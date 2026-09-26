@@ -52,6 +52,7 @@ import {
   getSentence,
   getTargetLabel,
   kindLabel,
+  migrateWorkspace,
   removeAnnotationReferences,
   updateSentenceText
 } from '@/lib/editor';
@@ -117,16 +118,45 @@ function buildHtml(document: TextDocument) {
     .join('\n');
 
   const notes = document.annotations
-    .map(
-      (annotation) =>
-        `<li><b>${escapeHtml(annotation.title)}</b> <span>${escapeHtml(annotation.source)}</span><br>${escapeHtml(annotation.body)}</li>`
-    )
+    .map((annotation) => {
+      const bodyHtml = annotation.mergedFrom?.length
+        ? `<ul class="merged">${annotation.mergedFrom
+            .map((entry) => `<li><b>${escapeHtml(entry.source)}</b>：${escapeHtml(entry.body)}</li>`)
+            .join('')}</ul>`
+        : escapeHtml(annotation.body);
+      return `<li><b>${escapeHtml(annotation.title)}</b> <span>${escapeHtml(annotation.source)}</span><br>${bodyHtml}</li>`;
+    })
     .join('\n');
 
+  const resolutions = document.resolutions.length
+    ? `<hr><h2>裁决校记</h2>${document.resolutions
+        .map((record) => {
+          const heading =
+            record.strategy === 'merge'
+              ? `以【${escapeHtml(record.winnerSource)}】为主合并 ${record.entries.length} 个来源`
+              : `选用【${escapeHtml(record.winnerSource)}】`;
+          const entries =
+            record.strategy === 'merge'
+              ? record.entries
+                  .map((entry) => `<li>并录【${escapeHtml(entry.source)}】${escapeHtml(entry.body)}</li>`)
+                  .join('')
+              : record.discarded
+                  .map(
+                    (entry) =>
+                      `<li>舍弃【${escapeHtml(entry.source)}】${escapeHtml(entry.title)}：${escapeHtml(entry.body)}</li>`
+                  )
+                  .join('');
+          return `<div class="resolution"><h3>${escapeHtml(record.anchorLabel)} · ${kindLabel(record.kind)} · ${heading}</h3>
+<p>选定正文：${escapeHtml(record.keptBody)}</p><ul>${entries}</ul>
+<small>裁决时间：${escapeHtml(new Date(record.createdAt).toLocaleString('zh-CN'))}</small></div>`;
+        })
+        .join('\n')}`
+    : '';
+
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(document.title)}</title>
-<style>body{max-width:780px;margin:48px auto;padding:0 28px;font:17px/1.9 Georgia,"Noto Serif SC",serif;color:#29251f}h1{text-align:center}h2{margin-top:2.4em;border-bottom:1px solid #ddd;padding-bottom:.35em}.summary{color:#6b665d}li{margin:.8em 0}small{color:#777}</style></head>
+<style>body{max-width:780px;margin:48px auto;padding:0 28px;font:17px/1.9 Georgia,"Noto Serif SC",serif;color:#29251f}h1{text-align:center}h2{margin-top:2.4em;border-bottom:1px solid #ddd;padding-bottom:.35em}.summary{color:#6b665d}li{margin:.8em 0}small{color:#777}.resolution{margin:1.2em 0;padding:0 0 0 1em;border-left:3px solid #c9bfa8}.resolution h3{font-size:1em;margin:0 0 .4em}ul.merged{padding-left:1.2em}</style></head>
 <body><h1>${escapeHtml(document.title)}</h1><p style="text-align:center">${escapeHtml(document.author)} · ${escapeHtml(document.edition)}</p>
-${sections}<hr><h2>注释与校记</h2><ol>${notes}</ol><p><small>导出时间：${new Date().toLocaleString('zh-CN')}</small></p></body></html>`;
+${sections}<hr><h2>注释与校记</h2><ol>${notes}</ol>${resolutions}<p><small>导出时间：${new Date().toLocaleString('zh-CN')}</small></p></body></html>`;
 }
 
 function sentenceAnnotationCount(document: TextDocument, sentence: Sentence) {
@@ -364,7 +394,7 @@ export function TextAnnotationWorkbench() {
       if (raw) {
         const stored = JSON.parse(raw) as WorkspaceState;
         if (stored.document?.chapters?.length) {
-          dispatch({ type: 'hydrate', workspace: stored });
+          dispatch({ type: 'hydrate', workspace: migrateWorkspace(stored) });
           if (stored.document.snapshots[0]) setLeftVersionId(stored.document.snapshots[0].id);
         }
       }
@@ -521,14 +551,40 @@ export function TextAnnotationWorkbench() {
       mutate: (doc) => {
         const winner = doc.annotations.find((annotation) => annotation.id === winnerId);
         if (!winner) return;
+        const now = new Date().toISOString();
+        const entries = group.annotations.map((item) => ({
+          annotationId: item.id,
+          source: item.source,
+          title: item.title,
+          body: item.body
+        }));
+        const discarded = entries.filter((entry) => entry.annotationId !== winnerId);
+        const keptBody = winner.body;
         for (const item of doc.annotations) {
           if (item.anchorId !== group.anchorId || item.kind !== group.kind) continue;
           item.conflictState = 'resolved';
-          item.conflictResolution = `${new Date().toISOString()} · 选用 ${winner.source}`;
+          item.conflictResolution = mergeBodies
+            ? `${now} · 以 ${winner.source} 为主合并 ${entries.length} 个来源`
+            : `${now} · 选用 ${winner.source}`;
         }
         if (mergeBodies) {
-          winner.body = group.annotations.map((item) => `【${item.source}】${item.body}`).join('\n\n');
+          winner.body = entries.map((entry) => `【${entry.source}】${entry.body}`).join('\n\n');
+          winner.mergedFrom = entries;
         }
+        doc.resolutions.push({
+          id: `resolution-${Date.now().toString(36)}-${doc.resolutions.length}`,
+          anchorId: group.anchorId,
+          anchorType: group.anchorType,
+          kind: group.kind,
+          anchorLabel: group.anchorLabel,
+          strategy: mergeBodies ? 'merge' : 'select',
+          winnerId,
+          winnerSource: winner.source,
+          keptBody,
+          entries,
+          discarded,
+          createdAt: now
+        });
       }
     });
   }
@@ -557,10 +613,11 @@ export function TextAnnotationWorkbench() {
         doc.snapshots.push({
           id,
           label,
-          note: `由编辑版保存，共 ${doc.annotations.length} 条注释`,
+          note: `由编辑版保存，共 ${doc.annotations.length} 条注释、${doc.resolutions.length} 条裁决记录`,
           createdAt: new Date().toISOString(),
           chapters: clone(doc.chapters),
-          annotations: clone(doc.annotations)
+          annotations: clone(doc.annotations),
+          resolutions: clone(doc.resolutions)
         });
       }
     });
@@ -577,6 +634,7 @@ export function TextAnnotationWorkbench() {
       mutate: (doc) => {
         doc.chapters = clone(version.chapters);
         doc.annotations = clone(version.annotations);
+        doc.resolutions = clone(version.resolutions ?? []);
       }
     });
   }
@@ -585,7 +643,12 @@ export function TextAnnotationWorkbench() {
     const left = document.snapshots.find((item) => item.id === leftVersionId) ?? document.snapshots[0];
     const right =
       rightVersionId === 'current'
-        ? { chapters: document.chapters, annotations: document.annotations, label: '当前草稿' }
+        ? {
+            chapters: document.chapters,
+            annotations: document.annotations,
+            resolutions: document.resolutions,
+            label: '当前草稿'
+          }
         : document.snapshots.find((item) => item.id === rightVersionId);
     if (!left || !right) return { left: null, right: null, changes: [] as { id: string; label: string; detail: string }[] };
 
@@ -612,6 +675,23 @@ export function TextAnnotationWorkbench() {
       if (!leftAnnotationIds.has(annotation.id)) {
         changes.push({ id: annotation.id, label: `新增注释 · ${annotation.title}`, detail: annotation.body });
       }
+    }
+    const leftResolutionIds = new Set((left.resolutions ?? []).map((record) => record.id));
+    for (const record of right.resolutions ?? []) {
+      if (leftResolutionIds.has(record.id)) continue;
+      changes.push({
+        id: record.id,
+        label:
+          record.strategy === 'merge'
+            ? `裁决记录 · 以 ${record.winnerSource} 为主合并 ${record.entries.length} 个来源`
+            : `裁决记录 · 选用 ${record.winnerSource}`,
+        detail:
+          record.strategy === 'merge'
+            ? record.entries.map((entry) => `【${entry.source}】${entry.body}`).join(' / ')
+            : `保留【${record.winnerSource}】${record.keptBody}；舍弃 ${record.discarded
+                .map((entry) => `【${entry.source}】${entry.body}`)
+                .join('；')}`
+      });
     }
     return { left, right, changes };
   }, [document, leftVersionId, rightVersionId]);
@@ -1004,9 +1084,67 @@ export function TextAnnotationWorkbench() {
                         <div className="grid place-items-center rounded-xl border border-dashed border-green-200 bg-green-50 p-8 text-center">
                           <Check className="h-8 w-8 text-green-600" />
                           <p className="mt-2 text-sm font-medium text-green-800">所有来源冲突均已解决</p>
-                          <p className="mt-1 text-xs text-green-700">已解决记录仍保留在各注释的来源字段中。</p>
+                          <p className="mt-1 text-xs text-green-700">取舍依据见下方裁决记录，并随版本快照与导出文件保存。</p>
                         </div>
                       ) : null}
+
+                      <Divider />
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h3 className="font-semibold text-stone-900">裁决记录</h3>
+                          <Chip size="sm" variant="flat">{document.resolutions.length} 条</Chip>
+                        </div>
+                        {document.resolutions.length ? (
+                          [...document.resolutions].reverse().map((record) => (
+                            <Card key={record.id} shadow="none" className="border border-stone-200 bg-white">
+                              <CardBody className="gap-2 p-3">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Chip size="sm" color={kindColors[record.kind]} variant="flat">
+                                    {kindLabel(record.kind)}
+                                  </Chip>
+                                  <Chip
+                                    size="sm"
+                                    color={record.strategy === 'merge' ? 'secondary' : 'primary'}
+                                    variant="bordered"
+                                  >
+                                    {record.strategy === 'merge' ? '合并条文' : '选用来源'}
+                                  </Chip>
+                                  <span className="ml-auto text-[11px] text-stone-400">
+                                    {new Date(record.createdAt).toLocaleString('zh-CN')}
+                                  </span>
+                                </div>
+                                <p className="line-clamp-2 font-serif text-xs text-stone-700">{record.anchorLabel}</p>
+                                <div className="rounded-lg bg-green-50 p-2 text-xs leading-5 text-green-900">
+                                  <b>
+                                    {record.strategy === 'merge'
+                                      ? `以【${record.winnerSource}】为主，合并 ${record.entries.length} 个来源`
+                                      : `选定【${record.winnerSource}】`}
+                                  </b>
+                                  <p className="mt-1">{record.keptBody}</p>
+                                </div>
+                                <div className="space-y-1">
+                                  {(record.strategy === 'merge' ? record.entries : record.discarded).map((entry) => (
+                                    <div
+                                      key={entry.annotationId}
+                                      className="rounded-lg bg-stone-50 p-2 text-xs leading-5 text-stone-600"
+                                    >
+                                      <b>
+                                        {record.strategy === 'merge' ? '并录' : '舍弃'}【{entry.source}】{entry.title}
+                                      </b>
+                                      <p className="mt-0.5">{entry.body}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                              </CardBody>
+                            </Card>
+                          ))
+                        ) : (
+                          <p className="rounded-lg border border-dashed border-stone-300 p-3 text-center text-xs text-stone-500">
+                            尚无裁决记录。解决冲突后，选中正文与其余来源原文会在此保留。
+                          </p>
+                        )}
+                      </div>
                     </div>
                   </ScrollShadow>
                 </Tab>
@@ -1056,6 +1194,8 @@ export function TextAnnotationWorkbench() {
                               type="button"
                               className="w-full rounded-lg bg-stone-50 p-2 text-left hover:bg-amber-50"
                               onClick={() => {
+                                const record = document.resolutions.find((item) => item.id === change.id);
+                                if (record) dispatch({ type: 'selectAnnotation', annotationId: record.winnerId });
                                 for (const chapter of document.chapters) {
                                   const sentence = chapter.sentences.find((item) => item.id === change.id);
                                   if (sentence) {

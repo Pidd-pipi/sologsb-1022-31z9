@@ -23,6 +23,31 @@ export interface Chapter {
   sentences: Sentence[];
 }
 
+export interface ResolutionSourceEntry {
+  annotationId: string;
+  source: string;
+  title: string;
+  body: string;
+}
+
+export interface ResolutionRecord {
+  id: string;
+  anchorId: string;
+  anchorType: AnchorType;
+  kind: AnnotationKind;
+  anchorLabel: string;
+  strategy: 'select' | 'merge';
+  winnerId: string;
+  winnerSource: string;
+  /** 选用时保留的选中正文；合并时为合并前的主条正文 */
+  keptBody: string;
+  /** 参与裁决的全部来源，逐条标明出处 */
+  entries: ResolutionSourceEntry[];
+  /** 选用时被舍弃的来源及原文 */
+  discarded: ResolutionSourceEntry[];
+  createdAt: string;
+}
+
 export interface Annotation {
   id: string;
   anchorId: string;
@@ -36,6 +61,8 @@ export interface Annotation {
   tags: string[];
   conflictState: 'open' | 'resolved';
   conflictResolution?: string;
+  /** 合并条文时逐条保留的出处 */
+  mergedFrom?: ResolutionSourceEntry[];
   updatedAt: string;
 }
 
@@ -46,6 +73,7 @@ export interface VersionSnapshot {
   createdAt: string;
   chapters: Chapter[];
   annotations: Annotation[];
+  resolutions: ResolutionRecord[];
 }
 
 export interface TextDocument {
@@ -55,6 +83,7 @@ export interface TextDocument {
   edition: string;
   chapters: Chapter[];
   annotations: Annotation[];
+  resolutions: ResolutionRecord[];
   snapshots: VersionSnapshot[];
   updatedAt: string;
 }
